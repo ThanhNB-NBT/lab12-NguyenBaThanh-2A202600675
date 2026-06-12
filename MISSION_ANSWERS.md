@@ -1,5 +1,15 @@
 # Day 12 Lab - Mission Answers
 
+> **Student Name:** Nguyễn Bá Thành   
+> **Student ID:** 2A202600675  
+> **Date:** 12/06/2026
+
+---
+
+##  Submission Requirements
+
+Submit a **GitHub repository** containing: https://github.com/ThanhNB-NBT/lab12-NguyenBaThanh-2A202600675.git
+
 ## Part 1: Localhost vs Production
 
 ### Exercise 1.1: Anti-patterns found
@@ -42,7 +52,7 @@
 
 ### Exercise 3.1: Railway deployment
 
-- URL: chua deploy cong khai trong phien nay vi can tai khoan Railway/Render cua sinh vien.
+- URL: https://prolific-youth-production-7052.up.railway.app/
 - Repo da co cau hinh san: `06-lab-complete/railway.toml` va `06-lab-complete/render.yaml`.
 - Lenh deploy Railway:
 

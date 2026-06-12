@@ -18,7 +18,14 @@ class Settings:
 
     # LLM
     openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
-    llm_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4o-mini"))
+    gemini_api_key: str = field(
+        default_factory=lambda: os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
+    )
+    llm_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gemini-3.1-flash-lite"))
+    llm_provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "gemini"))
+    llm_timeout_seconds: int = field(
+        default_factory=lambda: int(os.getenv("LLM_TIMEOUT_SECONDS", "20"))
+    )
 
     # Security
     agent_api_key: str = field(default_factory=lambda: os.getenv("AGENT_API_KEY", "dev-key-change-me"))
@@ -54,8 +61,10 @@ class Settings:
                 raise ValueError("AGENT_API_KEY must be set in production!")
             if any(marker in self.jwt_secret.lower() for marker in weak_key_markers):
                 raise ValueError("JWT_SECRET must be set in production!")
-        if not self.openai_api_key:
-            logger.warning("OPENAI_API_KEY not set — using mock LLM")
+        if self.llm_provider.lower() == "openai" and not self.openai_api_key:
+            logger.warning("OPENAI_API_KEY not set - using Day09 local answer")
+        if self.llm_provider.lower() == "gemini" and not self.gemini_api_key:
+            logger.warning("GEMINI_API_KEY/GOOGLE_API_KEY not set - using Day09 local answer")
         return self
 
 

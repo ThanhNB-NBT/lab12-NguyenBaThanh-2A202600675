@@ -1,14 +1,14 @@
 #  Delivery Checklist — Day 12 Lab Submission
 
-> **Student Name:** _________________________  
-> **Student ID:** _________________________  
-> **Date:** _________________________
+> **Student Name:** Nguyễn Bá Thành   
+> **Student ID:** 2A202600675  
+> **Date:** 12/06/2026
 
 ---
 
 ##  Submission Requirements
 
-Submit a **GitHub repository** containing:
+Submit a **GitHub repository** containing: https://github.com/ThanhNB-NBT/lab12-NguyenBaThanh-2A202600675.git
 
 ### 1. Mission Answers (40 points)
 

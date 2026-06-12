@@ -25,6 +25,7 @@ COPY --from=builder --chown=agent:agent /root/.local /home/agent/.local
 # Copy application
 COPY app/ ./app/
 COPY utils/ ./utils/
+COPY day09_data/ ./day09_data/
 
 RUN chown -R agent:agent /app
 

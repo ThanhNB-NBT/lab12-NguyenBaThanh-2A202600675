@@ -25,9 +25,26 @@ app.add_middleware(
 @app.get("/")
 def root():
     return {
-        "message": "AI Agent running on Railway!",
-        "docs": "/docs",
-        "health": "/health",
+        "headline": "Welcome to the Cloud-Native AI Command Deck",
+        "message": "Xin chào! Agent đã cất cánh trên Railway với phong cách hiện đại: nhanh, gọn, sẵn sàng scale.",
+        "tagline": "From localhost to live cloud: one API, one container, one futuristic experience.",
+        "experience": {
+            "mode": "modern-tech",
+            "vibe": "AI assistant + cloud platform + realtime operations",
+            "promise": "Nhận câu hỏi, xử lý bằng agent, trả về phản hồi rõ ràng trong vài mili-giây.",
+        },
+        "stack": ["FastAPI", "Railway", "Docker-ready", "Mock LLM", "Health checks"],
+        "try_it": {
+            "docs": "/docs",
+            "health": "/health",
+            "ask": {
+                "method": "POST",
+                "path": "/ask",
+                "body": {"question": "Tell me why cloud deployment feels futuristic"},
+            },
+        },
+        "status": "online",
+        "signature": "Lab 12 Deployment - modern cloud edition",
     }
 
 
@@ -37,10 +54,18 @@ async def ask_agent(request: Request):
     question = body.get("question", "")
     if not question:
         raise HTTPException(422, "question required")
+    answer = ask(question)
     return {
         "question": question,
-        "answer": ask(question),
+        "answer": answer,
+        "welcome": "Bạn đang nói chuyện với một AI agent chạy trên cloud - đây là bản demo deployment mang chất công nghệ hiện đại.",
+        "modern_signal": {
+            "latency_mindset": "low-latency API",
+            "deployment_mindset": "cloud-native",
+            "scaling_mindset": "stateless-ready",
+        },
         "platform": "Railway",
+        "served_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -52,8 +77,10 @@ def health():
     """
     return {
         "status": "ok",
+        "message": "Cloud agent is awake, responsive, and ready for modern AI traffic.",
         "uptime_seconds": round(time.time() - START_TIME, 1),
         "platform": "Railway",
+        "runtime": "FastAPI on Railway",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 

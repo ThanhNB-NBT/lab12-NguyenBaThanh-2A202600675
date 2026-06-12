@@ -5,7 +5,7 @@
 Pending real cloud deployment. Replace this line after running Railway or Render:
 
 ```text
-https://your-agent.railway.app
+https://prolific-youth-production-7052.up.railway.app/
 ```
 
 ## Platform

@@ -25,14 +25,18 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 import uvicorn
 
 from app.config import settings
 from app.auth import verify_api_key
 from app.cost_guard import cost_guard, estimate_cost_usd
+from app.day09_assistant import get_day09_assistant
+from app.gemini_client import gemini_client
 from app.rate_limiter import rate_limiter
 from app.session_store import session_store
+from app.web_ui import render_homepage
 
 # Mock LLM (thay bằng OpenAI/Anthropic khi có API key)
 from utils.mock_llm import ask as llm_ask
@@ -148,6 +152,9 @@ class AskResponse(BaseModel):
     question: str
     answer: str
     model: str
+    assistant_mode: str
+    route: dict
+    evidence: dict
     rate_limit: dict
     usage: dict
     storage: str
@@ -157,8 +164,13 @@ class AskResponse(BaseModel):
 # Endpoints
 # ─────────────────────────────────────────────────────────
 
-@app.get("/", tags=["Info"])
+@app.get("/", response_class=HTMLResponse, tags=["Info"])
 def root():
+    return HTMLResponse(render_homepage())
+
+
+@app.get("/api/info", tags=["Info"])
+def api_info():
     return {
         "app": settings.app_name,
         "version": settings.app_version,
@@ -197,7 +209,20 @@ async def ask_agent(
         "client": str(request.client.host) if request.client else "unknown",
     }))
 
-    answer = llm_ask(body.question)
+    day09_result = get_day09_assistant().answer(body.question)
+    answer = day09_result["answer"]
+    assistant_mode = day09_result.get("mode", "day09-shopping-assistant")
+
+    gemini_answer = gemini_client.rewrite_day09_answer(
+        question=body.question,
+        draft_answer=answer,
+        route=day09_result.get("route", {}),
+        policy=day09_result.get("policy"),
+        data=day09_result.get("data"),
+    )
+    if gemini_answer:
+        answer = gemini_answer
+        assistant_mode = "gemini-day09-shopping-assistant"
 
     output_tokens = len(answer.split()) * 2
     projected_total_cost = estimate_cost_usd(input_tokens, output_tokens)
@@ -213,6 +238,12 @@ async def ask_agent(
         question=body.question,
         answer=answer,
         model=settings.llm_model,
+        assistant_mode=assistant_mode,
+        route=day09_result.get("route", {}),
+        evidence={
+            "policy": day09_result.get("policy"),
+            "data": day09_result.get("data"),
+        },
         rate_limit=rate_info,
         usage={
             "month": usage.month,
@@ -231,7 +262,8 @@ def health():
     """Liveness probe. Platform restarts container if this fails."""
     status = "ok"
     checks = {
-        "llm": "mock" if not settings.openai_api_key else "openai",
+        "llm": "gemini" if gemini_client.is_configured else "day09-local",
+        "model": settings.llm_model,
         "state_store": session_store.storage,
     }
     return {
