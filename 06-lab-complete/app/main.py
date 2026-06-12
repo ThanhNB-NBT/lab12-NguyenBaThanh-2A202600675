@@ -19,17 +19,20 @@ import time
 import signal
 import logging
 import json
+import uuid
 from datetime import datetime, timezone
-from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Security, Depends, Request, Response
-from fastapi.security.api_key import APIKeyHeader
+from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 
 from app.config import settings
+from app.auth import verify_api_key
+from app.cost_guard import cost_guard, estimate_cost_usd
+from app.rate_limiter import rate_limiter
+from app.session_store import session_store
 
 # Mock LLM (thay bằng OpenAI/Anthropic khi có API key)
 from utils.mock_llm import ask as llm_ask
@@ -37,9 +40,27 @@ from utils.mock_llm import ask as llm_ask
 # ─────────────────────────────────────────────────────────
 # Logging — JSON structured
 # ─────────────────────────────────────────────────────────
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+        }
+        message = record.getMessage()
+        try:
+            payload.update(json.loads(message))
+        except json.JSONDecodeError:
+            payload["message"] = message
+        return json.dumps(payload, ensure_ascii=False)
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
-    format='{"ts":"%(asctime)s","lvl":"%(levelname)s","msg":"%(message)s"}',
+    handlers=[handler],
+    force=True,
 )
 logger = logging.getLogger(__name__)
 
@@ -47,54 +68,6 @@ START_TIME = time.time()
 _is_ready = False
 _request_count = 0
 _error_count = 0
-
-# ─────────────────────────────────────────────────────────
-# Simple In-memory Rate Limiter
-# ─────────────────────────────────────────────────────────
-_rate_windows: dict[str, deque] = defaultdict(deque)
-
-def check_rate_limit(key: str):
-    now = time.time()
-    window = _rate_windows[key]
-    while window and window[0] < now - 60:
-        window.popleft()
-    if len(window) >= settings.rate_limit_per_minute:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded: {settings.rate_limit_per_minute} req/min",
-            headers={"Retry-After": "60"},
-        )
-    window.append(now)
-
-# ─────────────────────────────────────────────────────────
-# Simple Cost Guard
-# ─────────────────────────────────────────────────────────
-_daily_cost = 0.0
-_cost_reset_day = time.strftime("%Y-%m-%d")
-
-def check_and_record_cost(input_tokens: int, output_tokens: int):
-    global _daily_cost, _cost_reset_day
-    today = time.strftime("%Y-%m-%d")
-    if today != _cost_reset_day:
-        _daily_cost = 0.0
-        _cost_reset_day = today
-    if _daily_cost >= settings.daily_budget_usd:
-        raise HTTPException(503, "Daily budget exhausted. Try tomorrow.")
-    cost = (input_tokens / 1000) * 0.00015 + (output_tokens / 1000) * 0.0006
-    _daily_cost += cost
-
-# ─────────────────────────────────────────────────────────
-# Auth
-# ─────────────────────────────────────────────────────────
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-
-def verify_api_key(api_key: str = Security(api_key_header)) -> str:
-    if not api_key or api_key != settings.agent_api_key:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid or missing API key. Include header: X-API-Key: <key>",
-        )
-    return api_key
 
 # ─────────────────────────────────────────────────────────
 # Lifespan
@@ -145,7 +118,8 @@ async def request_middleware(request: Request, call_next):
         # Security headers
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers.pop("server", None)
+        if "server" in response.headers:
+            del response.headers["server"]
         duration = round((time.time() - start) * 1000, 1)
         logger.info(json.dumps({
             "event": "request",
@@ -165,11 +139,18 @@ async def request_middleware(request: Request, call_next):
 class AskRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000,
                           description="Your question for the agent")
+    user_id: str = Field(default="anonymous", min_length=1, max_length=80)
+    session_id: str | None = Field(default=None, max_length=120)
 
 class AskResponse(BaseModel):
+    user_id: str
+    session_id: str
     question: str
     answer: str
     model: str
+    rate_limit: dict
+    usage: dict
+    storage: str
     timestamp: str
 
 # ─────────────────────────────────────────────────────────
@@ -201,15 +182,17 @@ async def ask_agent(
 
     **Authentication:** Include header `X-API-Key: <your-key>`
     """
-    # Rate limit per API key
-    check_rate_limit(_key[:8])  # use first 8 chars as key bucket
+    # Rate limit per user and API key. Redis keeps this consistent across replicas.
+    bucket = f"{body.user_id}:{_key[:8]}"
+    rate_info = rate_limiter.check(bucket)
 
-    # Budget check
     input_tokens = len(body.question.split()) * 2
-    check_and_record_cost(input_tokens, 0)
+    projected_input_cost = estimate_cost_usd(input_tokens, 0)
+    cost_guard.check_budget(projected_input_cost)
 
     logger.info(json.dumps({
         "event": "agent_call",
+        "user_id": body.user_id,
         "q_len": len(body.question),
         "client": str(request.client.host) if request.client else "unknown",
     }))
@@ -217,12 +200,28 @@ async def ask_agent(
     answer = llm_ask(body.question)
 
     output_tokens = len(answer.split()) * 2
-    check_and_record_cost(0, output_tokens)
+    projected_total_cost = estimate_cost_usd(input_tokens, output_tokens)
+    cost_guard.check_budget(projected_total_cost)
+    usage = cost_guard.record_usage(input_tokens, output_tokens)
+
+    session_id = body.session_id or str(uuid.uuid4())
+    turn_count = session_store.append_turn(session_id, body.question, answer)
 
     return AskResponse(
+        user_id=body.user_id,
+        session_id=session_id,
         question=body.question,
         answer=answer,
         model=settings.llm_model,
+        rate_limit=rate_info,
+        usage={
+            "month": usage.month,
+            "request_count": usage.request_count,
+            "cost_usd": round(usage.cost_usd, 6),
+            "monthly_budget_usd": settings.monthly_budget_usd,
+            "turn_count": turn_count,
+        },
+        storage=session_store.storage,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
@@ -231,7 +230,10 @@ async def ask_agent(
 def health():
     """Liveness probe. Platform restarts container if this fails."""
     status = "ok"
-    checks = {"llm": "mock" if not settings.openai_api_key else "openai"}
+    checks = {
+        "llm": "mock" if not settings.openai_api_key else "openai",
+        "state_store": session_store.storage,
+    }
     return {
         "status": status,
         "version": settings.app_version,
@@ -248,20 +250,36 @@ def ready():
     """Readiness probe. Load balancer stops routing here if not ready."""
     if not _is_ready:
         raise HTTPException(503, "Not ready")
-    return {"ready": True}
+    if not session_store.ping():
+        raise HTTPException(503, "State store unavailable")
+    return {"ready": True, "state_store": session_store.storage}
 
 
 @app.get("/metrics", tags=["Operations"])
 def metrics(_key: str = Depends(verify_api_key)):
     """Basic metrics (protected)."""
+    usage = cost_guard.get_usage()
     return {
         "uptime_seconds": round(time.time() - START_TIME, 1),
         "total_requests": _request_count,
         "error_count": _error_count,
-        "daily_cost_usd": round(_daily_cost, 4),
-        "daily_budget_usd": settings.daily_budget_usd,
-        "budget_used_pct": round(_daily_cost / settings.daily_budget_usd * 100, 1),
+        "month": usage.month,
+        "monthly_cost_usd": round(usage.cost_usd, 6),
+        "monthly_budget_usd": settings.monthly_budget_usd,
+        "budget_used_pct": round(usage.cost_usd / settings.monthly_budget_usd * 100, 1),
+        "rate_limit_storage": rate_limiter.storage,
+        "cost_guard_storage": cost_guard.storage,
+        "session_storage": session_store.storage,
     }
+
+
+@app.get("/sessions/{session_id}/history", tags=["Agent"])
+def session_history(session_id: str, _key: str = Depends(verify_api_key)):
+    """Return Redis-backed conversation history for a session."""
+    history = session_store.get_history(session_id)
+    if not history:
+        raise HTTPException(404, "Session not found or expired")
+    return {"session_id": session_id, "messages": history, "count": len(history)}
 
 
 # ─────────────────────────────────────────────────────────
